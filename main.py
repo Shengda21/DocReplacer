@@ -24,7 +24,7 @@ try:
 except ImportError:
     USE_BOOTSTRAP = False
 
-from replacer import load_rules, replace_in_docx, backup_file, restore_file, has_backup
+from replacer import load_rules, replace_in_file, backup_file, restore_file, has_backup, SUPPORTED_EXTENSIONS
 
 def resource_path(relative_path):
     """ 获取资源的绝对路径，兼容 PyInstaller 打包运行环境 """
@@ -271,6 +271,14 @@ class ReplacerApp:
         self.files_count_var = tk.StringVar(value="共 0 个文档")
         ttk.Label(frame, textvariable=self.files_count_var).pack(anchor=tk.W, pady=(3, 0))
 
+        # 支持的文件类型小字提示
+        supported_text = "支持格式: " + " ".join(SUPPORTED_EXTENSIONS)
+        ttk.Label(
+            frame, text=supported_text,
+            font=("Microsoft YaHei UI", 7),
+            foreground="#888888"
+        ).pack(anchor=tk.W, pady=(2, 0))
+
     def _build_statusbar(self, parent):
         """状态栏"""
         status_frame = ttk.Frame(parent)
@@ -499,10 +507,15 @@ class ReplacerApp:
 
     def _on_select_docs(self):
         """选择待替换的文档"""
+        ext_pattern = " ".join(f"*{e}" for e in SUPPORTED_EXTENSIONS)
         filepaths = filedialog.askopenfilenames(
-            title="选择 Word 文档",
+            title="选择文档",
             filetypes=[
-                ("Word 文档", "*.docx"),
+                ("支持的文档", ext_pattern),
+                ("Word 文档", "*.docx *.doc"),
+                ("Excel 文档", "*.xlsx *.xls"),
+                ("PowerPoint 文档", "*.pptx *.ppt"),
+                ("文本/CSV 文件", "*.txt *.csv"),
                 ("所有文件", "*.*"),
             ]
         )
@@ -522,7 +535,7 @@ class ReplacerApp:
         files = self.root.tk.splitlist(event.data)
         added = 0
         for filepath in files:
-            if Path(filepath).suffix.lower() == ".docx":
+            if Path(filepath).suffix.lower() in SUPPORTED_EXTENSIONS:
                 if filepath not in self.doc_files:
                     self.doc_files.append(filepath)
                     added += 1
@@ -533,7 +546,8 @@ class ReplacerApp:
             self.status_var.set(f"已选择 {len(self.doc_files)} 个文档 (新增 {added} 个)")
         else:
             if files:  # 如果拖入了文件但是没加进去，说明格式不对
-                messagebox.showwarning("提示", "只支持拖入 .docx 格式的文档")
+                supported = " ".join(SUPPORTED_EXTENSIONS)
+                messagebox.showwarning("提示", f"支持的格式: {supported}")
 
     def _refresh_files_list(self):
         """刷新文件列表"""
@@ -595,7 +609,7 @@ class ReplacerApp:
                 backup_file(fp)
 
                 # 替换
-                result = replace_in_docx(fp, self.rules)
+                result = replace_in_file(fp, self.rules)
                 total_replaced += result["total_replacements"]
 
             except Exception as e:

@@ -12,6 +12,10 @@ from typing import List, Tuple
 
 from docx import Document
 from openpyxl import load_workbook
+from pptx import Presentation
+
+# 支持的文件扩展名
+SUPPORTED_EXTENSIONS = [".docx", ".txt", ".xlsx", ".xls", ".pptx", ".ppt", ".csv", ".doc"]
 
 
 # ─── 替换规则加载 ────────────────────────────────────────────
@@ -241,3 +245,303 @@ def _cross_run_replace(paragraph, old_text: str, new_text: str) -> int:
         return count + _cross_run_replace(paragraph, old_text, new_text)
 
     return count
+
+
+# ─── TXT 替换 ─────────────────────────────────────────────
+
+def replace_in_txt(filepath: str, rules: List[Tuple[str, str]]) -> dict:
+    """
+    对 txt 文件执行批量替换。
+    返回 {"total_replacements": int, "detail": {原词: 替换次数}}
+    """
+    # 尝试多种编码读取
+    content = None
+    detected_encoding = None
+    for encoding in ("utf-8-sig", "utf-8", "gbk", "gb2312", "latin1"):
+        try:
+            with open(filepath, "r", encoding=encoding) as f:
+                content = f.read()
+            detected_encoding = encoding
+            break
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+
+    if content is None:
+        raise ValueError("无法读取文本文件，请确认文件编码")
+
+    detail = {}
+    for old_text, new_text in rules:
+        count = content.count(old_text)
+        if count > 0:
+            content = content.replace(old_text, new_text)
+            detail[old_text] = count
+
+    with open(filepath, "w", encoding=detected_encoding) as f:
+        f.write(content)
+
+    total = sum(detail.values())
+    return {"total_replacements": total, "detail": detail}
+
+
+# ─── XLSX 替换 ────────────────────────────────────────────
+
+def replace_in_xlsx(filepath: str, rules: List[Tuple[str, str]]) -> dict:
+    """
+    对 xlsx 文件执行批量替换。
+    遍历所有工作表和单元格。
+    返回 {"total_replacements": int, "detail": {原词: 替换次数}}
+    """
+    wb = load_workbook(filepath)
+    detail = {}
+
+    for old_text, new_text in rules:
+        count = 0
+        for ws in wb.worksheets:
+            for row in ws.iter_rows():
+                for cell in row:
+                    if cell.value is not None and isinstance(cell.value, str):
+                        if old_text in cell.value:
+                            count += cell.value.count(old_text)
+                            cell.value = cell.value.replace(old_text, new_text)
+        if count > 0:
+            detail[old_text] = count
+
+    wb.save(filepath)
+    wb.close()
+
+    total = sum(detail.values())
+    return {"total_replacements": total, "detail": detail}
+
+
+# ─── XLS 替换 ─────────────────────────────────────────────
+
+def replace_in_xls(filepath: str, rules: List[Tuple[str, str]]) -> dict:
+    """
+    对 xls (旧版 Excel) 文件执行批量替换。
+    使用 xlrd 读取 + xlwt 写入。
+    注意：格式保留有限。
+    返回 {"total_replacements": int, "detail": {原词: 替换次数}}
+    """
+    import xlrd
+    import xlwt
+
+    rb = xlrd.open_workbook(filepath, formatting_info=True)
+    wb = xlwt.Workbook()
+    detail = {}
+
+    for sheet_idx in range(rb.nsheets):
+        rs = rb.sheet_by_index(sheet_idx)
+        ws = wb.add_sheet(rs.name)
+
+        for row_idx in range(rs.nrows):
+            for col_idx in range(rs.ncols):
+                cell_value = rs.cell_value(row_idx, col_idx)
+                cell_type = rs.cell_type(row_idx, col_idx)
+
+                if cell_type == xlrd.XL_CELL_TEXT and isinstance(cell_value, str):
+                    new_value = cell_value
+                    for old_text, new_text in rules:
+                        cnt = new_value.count(old_text)
+                        if cnt > 0:
+                            detail[old_text] = detail.get(old_text, 0) + cnt
+                            new_value = new_value.replace(old_text, new_text)
+                    ws.write(row_idx, col_idx, new_value)
+                elif cell_type == xlrd.XL_CELL_NUMBER:
+                    ws.write(row_idx, col_idx, cell_value)
+                elif cell_type == xlrd.XL_CELL_DATE:
+                    ws.write(row_idx, col_idx, cell_value)
+                elif cell_type == xlrd.XL_CELL_BOOLEAN:
+                    ws.write(row_idx, col_idx, cell_value)
+                else:
+                    ws.write(row_idx, col_idx, cell_value)
+
+    wb.save(filepath)
+
+    total = sum(detail.values())
+    return {"total_replacements": total, "detail": detail}
+
+
+# ─── PPTX 替换 ────────────────────────────────────────────
+
+def replace_in_pptx(filepath: str, rules: List[Tuple[str, str]]) -> dict:
+    """
+    对 pptx 文件执行批量替换。
+    遍历所有幻灯片中的形状和文本框。
+    返回 {"total_replacements": int, "detail": {原词: 替换次数}}
+    """
+    prs = Presentation(filepath)
+    detail = {}
+
+    def process_text_frame(text_frame):
+        """处理文本框中的所有段落"""
+        nonlocal detail
+        for paragraph in text_frame.paragraphs:
+            for run in paragraph.runs:
+                for old_text, new_text in rules:
+                    if old_text in run.text:
+                        count = run.text.count(old_text)
+                        detail[old_text] = detail.get(old_text, 0) + count
+                        run.text = run.text.replace(old_text, new_text)
+
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                process_text_frame(shape.text_frame)
+            if shape.has_table:
+                for row in shape.table.rows:
+                    for cell in row.cells:
+                        process_text_frame(cell.text_frame)
+
+    prs.save(filepath)
+
+    total = sum(detail.values())
+    return {"total_replacements": total, "detail": detail}
+
+
+# ─── CSV 替换 ─────────────────────────────────────────────
+
+def replace_in_csv_file(filepath: str, rules: List[Tuple[str, str]]) -> dict:
+    """
+    对 csv 文件执行批量替换（当作纯文本处理）。
+    返回 {"total_replacements": int, "detail": {原词: 替换次数}}
+    """
+    # CSV 本质上是纯文本，直接用 txt 替换即可
+    return replace_in_txt(filepath, rules)
+
+
+# ─── DOC 替换（旧版 Word，使用 COM 自动化）────────────────
+
+def replace_in_doc(filepath: str, rules: List[Tuple[str, str]]) -> dict:
+    """
+    对 doc (旧版 Word) 文件执行批量替换。
+    使用 pywin32 COM 自动化（需要安装 Word）。
+    返回 {"total_replacements": int, "detail": {原词: 替换次数}}
+    """
+    try:
+        import win32com.client
+    except ImportError:
+        raise RuntimeError(
+            "处理 .doc 文件需要安装 pywin32 和 Microsoft Word。\n"
+            "请运行: pip install pywin32"
+        )
+
+    abs_path = str(Path(filepath).resolve())
+    word = None
+    doc = None
+    detail = {}
+
+    try:
+        word = win32com.client.Dispatch("Word.Application")
+        word.Visible = False
+        word.DisplayAlerts = False
+        doc = word.Documents.Open(abs_path)
+
+        for old_text, new_text in rules:
+            count = 0
+            # 使用 Find & Replace
+            find = doc.Content.Find
+            find.ClearFormatting()
+            find.Replacement.ClearFormatting()
+            while find.Execute(
+                FindText=old_text,
+                ReplaceWith=new_text,
+                Replace=1,  # wdReplaceOne
+                Forward=True,
+                Wrap=0,      # wdFindStop
+            ):
+                count += 1
+
+            if count > 0:
+                detail[old_text] = count
+
+        doc.Save()
+    finally:
+        if doc:
+            doc.Close(False)
+        if word:
+            word.Quit()
+
+    total = sum(detail.values())
+    return {"total_replacements": total, "detail": detail}
+
+
+# ─── PPT 替换（旧版 PowerPoint，使用 COM 自动化）──────────
+
+def replace_in_ppt(filepath: str, rules: List[Tuple[str, str]]) -> dict:
+    """
+    对 ppt (旧版 PowerPoint) 文件执行批量替换。
+    使用 pywin32 COM 自动化（需要安装 PowerPoint）。
+    返回 {"total_replacements": int, "detail": {原词: 替换次数}}
+    """
+    try:
+        import win32com.client
+    except ImportError:
+        raise RuntimeError(
+            "处理 .ppt 文件需要安装 pywin32 和 Microsoft PowerPoint。\n"
+            "请运行: pip install pywin32"
+        )
+
+    abs_path = str(Path(filepath).resolve())
+    ppt_app = None
+    presentation = None
+    detail = {}
+
+    try:
+        ppt_app = win32com.client.Dispatch("PowerPoint.Application")
+        presentation = ppt_app.Presentations.Open(abs_path, WithWindow=False)
+
+        for slide in presentation.Slides:
+            for shape in slide.Shapes:
+                if shape.HasTextFrame:
+                    tf = shape.TextFrame
+                    if tf.HasText:
+                        text = tf.TextRange.Text
+                        for old_text, new_text in rules:
+                            if old_text in text:
+                                count = text.count(old_text)
+                                detail[old_text] = detail.get(old_text, 0) + count
+                                # 使用 TextRange.Replace
+                                tr = tf.TextRange
+                                while True:
+                                    found = tr.Find(old_text)
+                                    if found is None or found.Length == 0:
+                                        break
+                                    found.Text = new_text
+                                    tr = tf.TextRange  # refresh
+
+        presentation.Save()
+    finally:
+        if presentation:
+            presentation.Close()
+        if ppt_app:
+            ppt_app.Quit()
+
+    total = sum(detail.values())
+    return {"total_replacements": total, "detail": detail}
+
+
+# ─── 统一分发函数 ─────────────────────────────────────────
+
+def replace_in_file(filepath: str, rules: List[Tuple[str, str]]) -> dict:
+    """
+    根据文件扩展名自动调用对应的替换函数。
+    返回 {"total_replacements": int, "detail": {原词: 替换次数}}
+    """
+    ext = Path(filepath).suffix.lower()
+
+    dispatch = {
+        ".docx": replace_in_docx,
+        ".txt":  replace_in_txt,
+        ".xlsx": replace_in_xlsx,
+        ".xls":  replace_in_xls,
+        ".pptx": replace_in_pptx,
+        ".ppt":  replace_in_ppt,
+        ".csv":  replace_in_csv_file,
+        ".doc":  replace_in_doc,
+    }
+
+    func = dispatch.get(ext)
+    if func is None:
+        raise ValueError(f"不支持的文件格式: {ext}")
+
+    return func(filepath, rules)

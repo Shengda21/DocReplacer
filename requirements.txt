@@ -2,3 +2,7 @@ python-docx
 openpyxl
 ttkbootstrap
 pyinstaller
+python-pptx
+xlrd
+xlwt
+pywin32
